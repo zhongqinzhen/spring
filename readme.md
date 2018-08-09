@@ -1029,3 +1029,244 @@ retVal = invocation.proceed();
 ```
 
 ![image-20180807143044761](https://ws1.sinaimg.cn/large/0069RVTdgy1fu14gzc9zlj31kw16zwmv.jpg)
+
+## SpringMVC
+
+在使用`Spring MVC`的时候，我们需要在`web.xml`中配置相应的`Servlet`容器配置
+
+```tomc
+<servlet>
+    <servlet-name>dispatcherServlet</servlet-name>
+    <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+    <init-param>
+        <param-name>contextConfigLocation</param-name>
+        <param-value>classpath:application-context.xml</param-value>
+    </init-param>
+    <load-on-startup>1</load-on-startup>
+</servlet>
+
+<servlet-mapping>
+    <servlet-name>dispatcherServlet</servlet-name>
+    <url-pattern>/*</url-pattern>
+</servlet-mapping>
+```
+
+那么在`Tomcat`容器启动的时候，会调用`DispatcherServlet#init()`方法，在方法内部会通过`initServletBean`方法去调用`initWebApplicationContext`初始化一个`web`应用容器；同时调用`onRefresh`方法来初始化`SpringMVC`的九大组件；
+
+```java
+# DispatcherServlet
+protected void onRefresh(ApplicationContext context) {
+    this.initStrategies(context);
+}
+
+protected void initStrategies(ApplicationContext context) {
+	// 初始化文件上传解析器
+    this.initMultipartResolver(context);
+    // 初始化国际化解析器
+    this.initLocaleResolver(context);
+    // 初始化主题解析器
+    this.initThemeResolver(context);
+    // 初始化HandlerMapping
+    this.initHandlerMappings(context);
+    // 初始化HandleAdapter
+    this.initHandlerAdapters(context);
+    // 初始化Handle异常解析器
+    this.initHandlerExceptionResolvers(context);
+    // 初始化请求视图转换器
+    this.initRequestToViewNameTranslator(context);
+    // 初始化View视图处理器
+    this.initViewResolvers(context);
+    // 初始化FlashMap管理器
+    this.initFlashMapManager(context);
+}
+```
+
+九大组件内部的处理方法大致是一致的，就是通过`IOC`容器先去获取对应的`Bean`，如果获取到了，就直接讲对应的`Bean`设置到相关的属性对象中；如果获取不到，就从默认策略中获取对应的`Bean`，文件上传解析器除外，找不到直接就留空；
+
+获取默认策略中的对应`Bean`的代码如下：
+
+```java
+protected <T> List<T> getDefaultStrategies(ApplicationContext context, Class<T> strategyInterface) {
+    String key = strategyInterface.getName();
+    String value = defaultStrategies.getProperty(key);
+    if(value == null) {
+        return new LinkedList();
+    } else {
+        String[] classNames = StringUtils.commaDelimitedListToStringArray(value);
+        ArrayList strategies = new ArrayList(classNames.length);
+        String[] var7 = classNames;
+        int var8 = classNames.length;
+
+        for(int var9 = 0; var9 < var8; ++var9) {
+            String className = var7[var9];
+            try {
+                Class err = ClassUtils.forName(className, DispatcherServlet.class.getClassLoader());
+                Object strategy = this.createDefaultStrategy(context, err);
+                strategies.add(strategy);
+            } catch (ClassNotFoundException var13) {
+                throw new BeanInitializationException("Could not find DispatcherServlet\'s default strategy class [" + className + "] for interface [" + key + "]", var13);
+            } catch (LinkageError var14) {
+                throw new BeanInitializationException("Error loading DispatcherServlet\'s default strategy class [" + className + "] for interface [" + key + "]: problem with class file or dependent class", var14);
+            }
+        }
+
+        return strategies;
+    }
+}
+```
+
+> 方法中的`defaultStrategies`为一个`properties`对象，会在静态方法中加载相应的资源配置内容
+>
+> `this.createDefaultStrategy(context, err)`主要为创建相应`Bean`的操作
+
+```java
+static {
+    try {
+        ClassPathResource ex = new ClassPathResource("DispatcherServlet.properties", DispatcherServlet.class);
+        defaultStrategies = PropertiesLoaderUtils.loadProperties(ex);
+    } catch (IOException var1) {
+        throw new IllegalStateException("Could not load \'DispatcherServlet.properties\': " + var1.getMessage());
+    }
+}
+```
+
+如果是通过默认策略初始化的九大组件，其对应的默认值为
+
+* multipartResolver：null
+* localeResolver：org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver
+* themeResolver：org.springframework.web.servlet.theme.FixedThemeResolver
+* handlerMappings
+  * org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping
+  * org.springframework.web.servlet.mvc.annotation.DefaultAnnotationHandlerMapping
+* handlerAdapters
+  * org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter
+  * org.springframework.web.servlet.mvc.SimpleControllerHandlerAdapter
+  * org.springframework.web.servlet.mvc.annotation.AnnotationMethodHandlerAdapter
+* handlerExceptionResolvers
+  * org.springframework.web.servlet.mvc.annotation.AnnotationMethodHandlerExceptionResolver
+  * org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver
+  * org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver
+* viewNameTranslator：org.springframework.web.servlet.view.DefaultRequestToViewNameTranslator
+* viewResolvers：org.springframework.web.servlet.view.InternalResourceViewResolver
+* flashMapManager：org.springframework.web.servlet.support.SessionFlashMapManager
+
+当我们通过浏览器访问对应的连接请求时，会进入`doGet`或者`doPost`方法中，完整的调用链条为：
+
+```java
+FrameworkServlet#doGet/doPost	-->
+FrameworkServlet#processRequest	-->
+// 初始化设置request的属性，并通过doDispatch分发
+DispatcherServlet#doService		-->
+// 中央控制器，控制请求的分发
+DispatcherServlet#doDispatch
+```
+
+`doDispatch`方法内部主要处理以下逻辑：
+
+* 是否是文件上传的请求
+
+  > processedRequest = this.checkMultipart(request);
+
+* 根据`request`请求获取`handlerMapping`，也就是根据`url`获取处理的`controller`；但是这里并不会直接返回`controller`，而是返回`HandlerExecutionChain`，里面包裹了`handler`跟`interceptors`对象；
+
+  > mappedHandler = this.getHandler(processedRequest);
+
+  `getHandler`内部会遍历所有的`handlerMapping`，获取`controller`的请求链接路径为：
+
+  ```java
+  AbstractHandlerMapping#getHandler -->
+  AbstractUrlHandlerMapping#getHandlerInternal -->
+  AbstractUrlHandlerMapping#lookupHandler
+  ```
+
+  > Object handler = this.handlerMap.get(urlPath);
+
+  通过`handlerMap`来获取对应的`handler`，而`handlerMap`则是在获取`Bean`，也就是`initializeBean`方法时通过前置动作来完成的；
+
+  ```java
+  AbstractAutowireCapableBeanFactory#initializeBean -->
+  AbstractAutowireCapableBeanFactory#applyBeanPostProcessorsBeforeInitialization	-->
+  ApplicationContextAwareProcessor#postProcessBeforeInitialization	-->
+  ApplicationContextAwareProcessor#invokeAwareInterfaces
+  ```
+
+  通过实现了`ApplicationContextAware`接口的`bean`的`setApplicationContext`中实现，调用链条为
+
+  ```java
+  ApplicationObjectSupport#setApplicationContext --> 
+  ApplicationObjectSupport#initApplicationContext	-->
+  AbstractDetectingUrlHandlerMapping#initApplicationContext	-->
+  AbstractDetectingUrlHandlerMapping#detectHandlers	-->
+  AbstractDetectingUrlHandlerMapping#registerHandler
+  ```
+
+* 获得处理`request`的处理适配器`handlerAdapter`
+
+  > HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+  如果`handler`对象既不是`HttpRequestHandler`也不是`Controller`的类型，那么将会进入到`AnnotationMethodHandlerAdapter#supports`方法中；在第一次访问url链接的时候，会通过构建一个`ServletHandlerMethodResolver`，在构造器中会通过`init`方法，检查类中的方法，如果方法上有`RequestMapping`注解，那么会添加到`handlerMethods`中，后续查找`HandlerAdapter`的时候，只需要判断通过`handler.class`获取`ServletHandlerMethodResolver`，判断其`handlerMethods`属性即可；
+
+* 通过`HandlerAdapter`处理请求，真正执行`controller`中的方法，返回结果视图对象
+
+  > mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+
+  通过`HandlerAdapter`进行反射调用，拿到反射调用的结果值，通过判断结果值的类型跟方法上是否存在`ResponseBody`注解，来决定是否返回`ModelAndView`给前端；
+
+  ```java
+  AnnotationMethodHandlerAdapter#handle -->
+  AnnotationMethodHandlerAdapter#invokeHandlerMethod -->
+  // 进行反射调用
+  ServletHandlerMethodInvoker#invokeHandlerMethod -->
+  // 处理返回结果值，决定是否返回ModelAndView
+  ServletHandlerMethodInvoker#getModelAndView -->
+  // 设置Model属性
+  ServletHandlerMethodInvoker#updateModelAttributes
+  ```
+
+* 处理结果视图名称
+
+  > applyDefaultViewName(processedRequest, mv);
+
+  通过`viewNameTranslator`来设置视图的名称，调用处代码
+
+  ```java
+  private void applyDefaultViewName(HttpServletRequest request, ModelAndView mv) throws Exception {
+      if (mv != null && !mv.hasView()) {
+          mv.setViewName(getDefaultViewName(request));
+      }
+  }
+  
+  protected String getDefaultViewName(HttpServletRequest request) throws Exception {
+      return this.viewNameTranslator.getViewName(request);
+  }
+  
+  # DefaultRequestToViewNameTranslator
+  // 拼凑前缀后缀，并处理url链接
+  public String getViewName(HttpServletRequest request) {
+      String lookupPath = this.urlPathHelper.getLookupPathForRequest(request);
+      return (this.prefix + transformPath(lookupPath) + this.suffix);
+  }
+  ```
+
+  > 在通过HandlerAdapter反射调用返回ModelAndView前后，会调用拦截器的前置及后置方法，如果拦截器的前置方法返回false，那么会中断操作；
+
+  ```java
+  // 拦截器前置动作
+  if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+      return;
+  }
+  // Actually invoke the handler.
+  mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+  
+  if (asyncManager.isConcurrentHandlingStarted()) {
+      return;
+  }
+  
+  applyDefaultViewName(processedRequest, mv);
+  
+  // 拦截器后置动作
+  mappedHandler.applyPostHandle(processedRequest, response, mv);
+  ```
+
+  
+
